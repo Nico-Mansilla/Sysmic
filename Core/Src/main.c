@@ -23,6 +23,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <string.h>
 #include "nrf24.h"
 #include "board.h"
 #include "string.h"
@@ -46,7 +47,7 @@
 #define VL6180X_THRESHOLD       65
 #define VL6180X_SAMPLE_TIME     50 //[ms]
 
-#define nRF24L01_SYSMIC_CHANNEL 0x6A
+#define nRF24L01_SYSMIC_CHANNEL 0x6A // CHANNEL
 
 enum {
   KICKER_DISCHARGED = 0x00,
@@ -104,21 +105,32 @@ void KickFunction(void const * argument);
 
 /* USER CODE BEGIN PFP */
 /* TODO: make object of wheel/motor in open loop */
+void nRF24_TxPacket(nRF24_Handler_t *device, uint8_t* Buf, uint32_t Len);
+void PackageTxBuffer(uint8_t *buf);
+
 void BallDetectorFunction(void const * argument);
 void setSpeed(uint8_t *buffer, float *velocity, uint8_t *turn);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+uint16_t robot_id;
+
+uint8_t txBuffer[32] = {
+    'R','a','d','i','o',' ','O','N','\n'	//termina en <=60 \n=10
+};
+
+
 uint8_t rxBuffer[32];
 uint8_t rx_len;
 
 uint8_t status;
+uint8_t config;
 uint8_t direction[4];
 float speed[4];
 float kinematic[4][3];
 Motor_Handler_t motor[4];
-uint16_t robot_id;
 
 float dribbler_speed = 0.0f;
 uint8_t dribbler_sel = 0;
@@ -829,6 +841,58 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+// Function to fill the txBuffer with motor speeds
+void updateBuffer(uint8_t *buffer) {
+
+    // Copy the motor speeds to the txBuffer
+    memcpy(&buffer[0], &motor[0].measSpeed, sizeof(float));
+    memcpy(&buffer[4], '\n',1);
+    memcpy(&buffer[4+1], &motor[1].measSpeed, sizeof(float));
+    memcpy(&buffer[8], '\n',1);
+    memcpy(&buffer[8+1], &motor[2].measSpeed, sizeof(float));
+    memcpy(&buffer[12], '\n',1);
+    memcpy(&buffer[12+1], &motor[3].measSpeed, sizeof(float));
+
+    // Fill the remaining part of the buffer with zeros if necessary
+    memset(&buffer[16], 0, 16);
+}
+
+
+void nRF24_TxPacket(nRF24_Handler_t *device, uint8_t* Buf, uint32_t Len) {
+	HAL_GPIO_WritePin(GPIOI, GPIO_PIN_12, GPIO_PIN_SET);
+
+	for(uint32_t i = 0; i < Len; i++)	{
+		device->tx_data[i] = *Buf++;
+	}
+
+
+	nRF24_WritePayload(device, device->tx_data, Len);
+	nRF24_CE_State(device, GPIO_PIN_SET);
+
+	while(!(status & (nRF24_FLAG_TX_DS)))	{
+		status = nRF24_GetStatus(device);
+	}
+
+	nRF24_ClearIRQFlagsTx(device);
+	nRF24_FlushTX(device);
+
+	nRF24_CE_State(device, GPIO_PIN_RESET);
+
+	HAL_GPIO_WritePin(GPIOI, GPIO_PIN_12, GPIO_PIN_RESET);
+}
+
+//void PackageTxBuffer(uint8_t *txBuffer){
+//
+//	txBuffer[0] = (uint8_t)robot_id;
+//
+//	memcpy(&txBuffer[1], &motor[0].measSpeed, sizeof(motor[0].measSpeed));
+//	memcpy(&txBuffer[5], &motor[1].measSpeed, sizeof(motor[1].measSpeed));
+//	memcpy(&txBuffer[9], &motor[2].measSpeed, sizeof(motor[2].measSpeed));
+//	memcpy(&txBuffer[13], &motor[3].measSpeed, sizeof(motor[3].measSpeed));
+//}
+
+
 float v_vel[3];
 void setSpeed(uint8_t *buffer, float *velocity, uint8_t *turn)
 {
@@ -1061,47 +1125,92 @@ void DriveFunction(void const * argument)
 */
 
 /* USER CODE END Header_RadioFunction */
-void RadioFunction(void const * argument)
-{
-  /* USER CODE BEGIN RadioFunction */
-  nRF24_HW_Init(&nrf_device, &hspi1, GPIOG, GPIO_PIN_10, GPIOG, GPIO_PIN_9);
-  nRF24_Init(&nrf_device);
-  nRF24_SetAddr(&nrf_device, nRF24_PIPE0, rx_node_addr);
-  nRF24_SetRFChannel(&nrf_device, nRF24L01_SYSMIC_CHANNEL);
-  nRF24_SetRXPipe(&nrf_device, nRF24_PIPE0, nRF24_AA_OFF, 30);
-  nRF24_DisableAA(&nrf_device, nRF24_PIPETX);
-  nRF24_SetPowerMode(&nrf_device, nRF24_PWR_UP);
-  nRF24_SetOperationalMode(&nrf_device, nRF24_MODE_RX);
-  nRF24_RX_ON(&nrf_device);
-	/*
-	checkSPI = nRF24_Check();
-	memset(rxAddr, 0xE7, 5);
-	nRF24_SetAddr(0, rxAddr);
-	*/
-	
-	memset(nrf_device.rx_data, 0, 30);
-	/* Infinite loop */
-	for(;;)
-	{
-		osMessageGet(nrf24CheckHandle, osWaitForever);
-		status = nRF24_GetStatus(&nrf_device);
-		
-		//if(nRF24_GetStatus_RXFIFO() == nRF24_STATUS_RXFIFO_DATA)
-		if(status & nRF24_FLAG_RX_DR)
-		{
-			nRF24_ReadPayload(&nrf_device, nrf_device.rx_data, &rx_len);
-			nRF24_FlushRX(&nrf_device);
-			nRF24_ClearIRQFlags(&nrf_device);
-						
-			/* Obtain speed from nrf24L01+ packet */
-			setSpeed(nrf_device.rx_data + 5 * robot_id, speed, direction);
-			dribbler_sel = getDribbler_speed(nrf_device.rx_data + 5 * robot_id);
-			kick_sel = getKickerStatus(nrf_device.rx_data + 5 * robot_id);		
-		}
-	}
-  /* USER CODE END RadioFunction */
-}
+void RadioFunction(void const * argument) {
+	/* USER CODE BEGIN RadioFunction */
+	tx_node_addr[4]=Board_GetID();
 
+	nRF24_HW_Init(&nrf_device, &hspi1, GPIOG, GPIO_PIN_10, GPIOG, GPIO_PIN_9);
+	nRF24_Init(&nrf_device);
+
+	// Configurar dirección y canal de RF
+	nRF24_SetAddr(&nrf_device, nRF24_PIPE0, rx_node_addr);
+	nRF24_SetRFChannel(&nrf_device, nRF24L01_SYSMIC_CHANNEL);
+	nRF24_SetRXPipe(&nrf_device, nRF24_PIPE0, nRF24_AA_OFF, 30);
+
+	// Encender y configurar en modo RX
+	nRF24_SetPowerMode(&nrf_device, nRF24_PWR_UP);
+	nRF24_SetOperationalMode(&nrf_device, nRF24_MODE_RX);
+	nRF24_RX_ON(&nrf_device);
+	
+	memset(nrf_device.rx_data, 0, 32);
+/*
+	// Configurar el canal de transmisión una vez al inicio
+	nRF24_DisableAA(&nrf_device, nRF24_PIPETX);
+	nRF24_SetAddr(&nrf_device, nRF24_PIPETX, tx_node_addr);
+	config = nRF24_GetConfig(&nrf_device);
+*/
+	/* Infinite loop */
+	for(;;) {
+	osMessageGet(nrf24CheckHandle, osWaitForever);
+	status = nRF24_GetStatus(&nrf_device);
+	config = nRF24_GetConfig(&nrf_device);
+
+
+	if (status & nRF24_FLAG_RX_DR) {
+		nRF24_ReadPayload(&nrf_device, nrf_device.rx_data, &rx_len);
+		nRF24_FlushRX(&nrf_device);
+		nRF24_ClearIRQFlagsRx(&nrf_device);
+
+		// Procesar datos recibidos
+		setSpeed(nrf_device.rx_data + 5 * robot_id, speed, direction);
+		dribbler_sel = getDribbler_speed(nrf_device.rx_data + 5 * robot_id);
+		kick_sel = getKickerStatus(nrf_device.rx_data + 5 * robot_id);
+
+
+
+
+
+		//PackageTxBuffer(txBuffer); //empaqueeta las velocidades en txbuffer
+		//memcpy(txBuffer, nrf_device.rx_data, sizeof(nrf_device.rx_data));
+		//txBuffer[31] = '\n';
+		//txBuffer[30] = Board_GetID();
+
+		//Actualiza informacion del buffer tx motor[i].measSpeed
+		updateBuffer(txBuffer);
+
+
+		// Cambiar a modo TX y enviar datos
+
+		nRF24_RX_OFF(&nrf_device);
+		nRF24_SetOperationalMode(&nrf_device, nRF24_MODE_TX);
+		//osDelay(40); // Pequeña demora para asegurar que termine de configurarse, evita mandar paquetes erroneos
+
+		while((config & (nRF24_CONFIG_PRIM_RX)))	{//waits for prim_rx to be 0
+				config = nRF24_GetConfig(&nrf_device);
+		}
+
+		nRF24_TxPacket(&nrf_device, txBuffer, 32);
+
+		// Volver a modo RX
+
+		nRF24_SetOperationalMode(&nrf_device, nRF24_MODE_RX);
+		while(!(config & (nRF24_CONFIG_PRIM_RX)))	{//waits for prim_rx to be 0
+					config = nRF24_GetConfig(&nrf_device);
+			}
+
+		nRF24_RX_ON(&nrf_device);
+		nRF24_ClearIRQFlags(&nrf_device);
+
+
+
+	}
+
+
+
+
+	}
+	/* USER CODE END RadioFunction */
+}
 /* USER CODE BEGIN Header_KickFunction */
 /**
 * @brief Function implementing the kickTask thread.
